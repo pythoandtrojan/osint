@@ -1,0 +1,1753 @@
+#!/usr/bin/env python3
+import os
+import requests
+import json
+import time
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import sys
+import re
+import urllib.parse
+
+PASTA_RESULTADOS = "ErikNet_Results"
+os.makedirs(PASTA_RESULTADOS, exist_ok=True)
+
+class colors:
+    GREEN = '\033[92m'
+    RED = '\033[91m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    END = '\033[0m'
+    BOLD = '\033[1m'
+
+BANNER = colors.BLUE + r"""
+███████░██░ ░██░███████░░   ██░     ░██░  ░██░██████░ ██   ██░███████░██████░
+░░░██░░ ██░░░██░██  ░░      ██░░    ░██░  ░██░██   ██ ██  ██░ ██░░░░  ██   ██░
+  ░██░  ███████░█████░░     ██░     ░██░  ░██░██████░ ████░   █████   ██████░░
+  ░██░░ ██   ██░██   ░░     ██░░░░  ░██░░░░██░██  ██░ ██░░██░ ██░░░   ██   ██░░
+  ░██░░ ██░░░██░███████░░   ███████ ░████████░██░░░██ ██░░ ██ ███████ ██   ██░
+   ░░░  ░░░ ░░░ ░░░░░░░     ░░░░░░░  ░░░░░░░░ ░░   ░░ ░░  ░░░ ░░░░░░░░░░░░░░░░
+   ░ ░  ░     ░ ░   ░ ░     ░░   ░░  ░░░  ░░░  ░   ░  ░    ░░ ░░    ░░      ░░
+  ░  ░             ░   ░    ░   ░    ░  ░   ░  ░    ░       ░  ░   ░       ░ 
+""" + colors.END
+BANNER += colors.YELLOW + "  made in Brazil by Erik (16y) - Linux and Termux" + colors.END
+
+def limpar_tela():
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+def validar_usuario(username):
+    """Valida se o nome de usuário é válido"""
+    if not username:
+        return False
+    if len(username) < 3 or len(username) > 50:  # Aumentado para permitir nomes completos
+        return False
+    if not re.match(r'^[a-zA-Z0-9_.-]+$', username):
+        return False
+    return True
+
+def verificar_site(site, username):
+    """Função para verificar um único site com verificações robustas específicas"""
+    config = sites[site]
+    try:
+        # Tratamento especial para nomes completos (nome.sobrenome)
+        username_encoded = urllib.parse.quote(username)
+        url = config["url"].format(username=username_encoded)
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        
+        # Verificações específicas para cada site
+        if site == "GitHub":
+            api_url = f"https://api.github.com/users/{username}"
+            response = requests.get(api_url, headers=headers, timeout=10)
+            exists = response.status_code == 200 and "login" in response.json()
+            if exists:
+                profile_data = response.json()
+                return site, {
+                    'exists': True,
+                    'url': f"https://github.com/{username}",
+                    'method': "API",
+                    'categoria': config["categoria"],
+                    'status_code': response.status_code,
+                    'nome_perfil': profile_data.get('name', username),
+                    'bio': profile_data.get('bio'),
+                    'seguidores': profile_data.get('followers'),
+                    'seguindo': profile_data.get('following')
+                }, None
+        
+        elif site == "Twitter":
+            # Verificação via API não oficial (pode ser instável)
+            response = requests.get(f"https://twitter.com/i/api/i/users/username_available.json?username={username}", 
+                                  headers={'Authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA'}, 
+                                  timeout=10)
+            if response.status_code == 200:
+                exists = not response.json().get('valid', False)
+            else:
+                # Fallback para scraping
+                response = requests.get(url, headers=headers, timeout=10)
+                exists = response.status_code == 200 and f'@{username}' in response.text
+            
+            if exists:
+                return site, {
+                    'exists': True,
+                    'url': url,
+                    'method': "API/Scraping",
+                    'categoria': config["categoria"],
+                    'status_code': response.status_code,
+                    'nome_perfil': username
+                }, None
+        
+        elif site == "Instagram":
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                # Verificação mais precisa
+                exists = f'"username":"{username}"' in response.text and 'og:title' in response.text
+            else:
+                exists = False
+            
+            if exists:
+                return site, {
+                    'exists': True,
+                    'url': url,
+                    'method': "Scraping",
+                    'categoria': config["categoria"],
+                    'status_code': response.status_code,
+                    'nome_perfil': username
+                }, None
+        
+        elif site == "Facebook":
+            # Facebook pode usar nomes completos (nome.sobrenome)
+            response = requests.get(url, headers=headers, timeout=10, allow_redirects=False)
+            # Facebook redireciona para login se não existir
+            exists = response.status_code == 200 and f'facebook.com/{username}' in response.text
+            
+            if exists:
+                return site, {
+                    'exists': True,
+                    'url': url,
+                    'method': "Scraping",
+                    'categoria': config["categoria"],
+                    'status_code': response.status_code,
+                    'nome_perfil': username.replace('.', ' ')  # Mostra nome formatado
+                }, None
+        
+        elif site == "YouTube":
+            # Verificação via API do YouTube
+            api_key = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"  # Chave pública (pode ter limites)
+            api_url = f"https://www.googleapis.com/youtube/v3/channels?part=snippet&forUsername={username}&key={api_key}"
+            response = requests.get(api_url, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                exists = data.get('pageInfo', {}).get('totalResults', 0) > 0
+                if exists:
+                    channel = data['items'][0]['snippet']
+                    return site, {
+                        'exists': True,
+                        'url': f"https://youtube.com/{username}",
+                        'method': "API",
+                        'categoria': config["categoria"],
+                        'status_code': response.status_code,
+                        'nome_perfil': channel.get('title', username),
+                        'descricao': channel.get('description'),
+                        'thumbnail': channel.get('thumbnails', {}).get('default', {}).get('url')
+                    }, None
+            else:
+                # Fallback para scraping
+                response = requests.get(url, headers=headers, timeout=10)
+                exists = response.status_code == 200 and 'channelId' in response.text
+                if exists:
+                    return site, {
+                        'exists': True,
+                        'url': url,
+                        'method': "Scraping",
+                        'categoria': config["categoria"],
+                        'status_code': response.status_code,
+                        'nome_perfil': username
+                    }, None
+        
+        elif site == "Reddit":
+            api_url = f"https://www.reddit.com/user/{username}/about.json"
+            response = requests.get(api_url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                exists = not data.get('error', 404) == 404 and 'data' in data
+                if exists:
+                    return site, {
+                        'exists': True,
+                        'url': f"https://reddit.com/user/{username}",
+                        'method': "API",
+                        'categoria': config["categoria"],
+                        'status_code': response.status_code,
+                        'nome_perfil': data['data'].get('name', username),
+                        'karma': data['data'].get('total_karma')
+                    }, None
+            else:
+                # Fallback para scraping
+                response = requests.get(url, headers=headers, timeout=10)
+                exists = response.status_code == 200 and 'class="_3t5uN8xUmg0TOwRCOGQEcU"' in response.text
+                if exists:
+                    return site, {
+                        'exists': True,
+                        'url': url,
+                        'method': "Scraping",
+                        'categoria': config["categoria"],
+                        'status_code': response.status_code,
+                        'nome_perfil': username
+                    }, None
+        
+        elif site == "LinkedIn":
+            response = requests.get(url, headers=headers, timeout=10)
+            # LinkedIn mostra página de perfil ou página de erro
+            exists = response.status_code == 200 and 'profile' in response.text.lower() and 'error' not in response.text.lower()
+            
+            if exists:
+                return site, {
+                    'exists': True,
+                    'url': url,
+                    'method': "Scraping",
+                    'categoria': config["categoria"],
+                    'status_code': response.status_code,
+                    'nome_perfil': username.replace('.', ' ')  # Mostra nome formatado
+                }, None
+        
+        elif site == "Pinterest":
+            api_url = f"https://www.pinterest.com/resource/UserResource/get/?source_url=%2F{username}%2F&data=%7B%22options%22%3A%7B%22username%22%3A%22{username}%22%7D%2C%22context%22%3A%7B%7D%7D"
+            response = requests.get(api_url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                exists = 'resource_response' in data and 'data' in data['resource_response']
+                if exists:
+                    return site, {
+                        'exists': True,
+                        'url': f"https://pinterest.com/{username}",
+                        'method': "API",
+                        'categoria': config["categoria"],
+                        'status_code': response.status_code,
+                        'nome_perfil': data['resource_response']['data'].get('full_name', username)
+                    }, None
+            else:
+                # Fallback para scraping
+                response = requests.get(url, headers=headers, timeout=10)
+                exists = response.status_code == 200 and f'profile_url":"/{username}"' in response.text
+                if exists:
+                    return site, {
+                        'exists': True,
+                        'url': url,
+                        'method': "Scraping",
+                        'categoria': config["categoria"],
+                        'status_code': response.status_code,
+                        'nome_perfil': username
+                    }, None
+        
+        elif site == "TikTok":
+            # Verificação via API não oficial
+            response = requests.get(f"https://www.tiktok.com/@{username}", headers=headers, timeout=10)
+            exists = response.status_code == 200 and f'@{username}' in response.text.lower()
+            
+            if exists:
+                return site, {
+                    'exists': True,
+                    'url': f"https://www.tiktok.com/@{username}",
+                    'method': "Scraping",
+                    'categoria': config["categoria"],
+                    'status_code': response.status_code,
+                    'nome_perfil': username
+                }, None
+        
+        elif site == "Kwai":
+            # Verificação via scraping
+            response = requests.get(f"https://kwai.com/user/{username}", headers=headers, timeout=10)
+            exists = response.status_code == 200 and 'profile' in response.text.lower()
+            
+            if exists:
+                return site, {
+                    'exists': True,
+                    'url': f"https://kwai.com/user/{username}",
+                    'method': "Scraping",
+                    'categoria': config["categoria"],
+                    'status_code': response.status_code,
+                    'nome_perfil': username
+                }, None
+        
+        elif site == "Chopi":
+            # Verificação via scraping
+            response = requests.get(f"https://chopi.com.br/{username}", headers=headers, timeout=10)
+            exists = response.status_code == 200 and 'profile' in response.text.lower()
+            
+            if exists:
+                return site, {
+                    'exists': True,
+                    'url': f"https://chopi.com.br/{username}",
+                    'method': "Scraping",
+                    'categoria': config["categoria"],
+                    'status_code': response.status_code,
+                    'nome_perfil': username
+                }, None
+        
+        elif site == "Stream":
+            # Verificação via scraping
+            response = requests.get(f"https://stream.me/{username}", headers=headers, timeout=10)
+            exists = response.status_code == 200 and 'profile' in response.text.lower()
+            
+            if exists:
+                return site, {
+                    'exists': True,
+                    'url': f"https://stream.me/{username}",
+                    'method': "Scraping",
+                    'categoria': config["categoria"],
+                    'status_code': response.status_code,
+                    'nome_perfil': username
+                }, None
+
+        # Verificação padrão para outros sites
+        response = requests.get(url, headers=headers, timeout=10, allow_redirects=False)
+        exists = response.status_code == 200
+        
+        dados = {
+            'exists': exists,
+            'url': url,
+            'method': config["method"],
+            'categoria': config["categoria"],
+            'status_code': response.status_code
+        }
+        
+        if exists:
+            dados['nome_perfil'] = username.replace('.', ' ')  # Mostra nome formatado
+        
+        return site, dados, None
+        
+    except requests.exceptions.RequestException as e:
+        return site, None, f"Erro de conexão: {str(e)}"
+    except Exception as e:
+        return site, None, f"Erro inesperado: {str(e)}"
+
+def mostrar_resultado_individual(site, dados, error):
+    """Mostra o resultado de um único site com mais detalhes"""
+    if error:
+        print(f"  {colors.RED}🔴 {site}: Erro ({error}){colors.END}")
+    elif dados['exists']:
+        print(f"  {colors.GREEN}🟢 {site}: Encontrado ({dados['method']}){colors.END}")
+        print(f"     {colors.BLUE}🌐 URL: {dados['url']}{colors.END}")
+        if 'nome_perfil' in dados:
+            print(f"     {colors.BLUE}👤 Nome: {dados['nome_perfil']}{colors.END}")
+        # Mostrar informações adicionais quando disponíveis
+        for key, value in dados.items():
+            if key not in ['exists', 'url', 'method', 'categoria', 'status_code', 'nome_perfil']:
+                print(f"     {colors.BLUE}📌 {key.capitalize()}: {value}{colors.END}")
+    else:
+        print(f"  {colors.YELLOW}⚪ {site}: Não encontrado (Status: {dados['status_code']}){colors.END}")
+
+def buscar_perfis(username):
+    """Busca o usuário em todas as plataformas com threads"""
+    if not validar_usuario(username):
+        print(f"{colors.RED}Nome de usuário inválido! Use apenas letras, números, pontos, traços e underscores.{colors.END}")
+        return None
+    
+    print(f"\n{colors.BOLD}Busca iniciada para: {username}{colors.END}")
+    print(f"{colors.YELLOW}Verificando {len(sites)} plataformas...{colors.END}\n")
+    
+    resultados = {}
+    total_sites = len(sites)
+    sites_verificados = 0
+    
+    with ThreadPoolExecutor(max_workers=15) as executor:
+        futures = {
+            executor.submit(verificar_site, site, username): site 
+            for site in sites
+        }
+        
+        for future in as_completed(futures):
+            site = futures[future]
+            sites_verificados += 1
+            try:
+                site, dados, error = future.result()
+                if dados:
+                    resultados[site] = dados
+                mostrar_resultado_individual(site, dados, error)
+                
+                progresso = int((sites_verificados / total_sites) * 100)
+                sys.stdout.write(f"\r{colors.BLUE}Progresso: {progresso}% ({sites_verificados}/{total_sites}){colors.END}")
+                sys.stdout.flush()
+                
+            except Exception as e:
+                print(f"\nErro ao processar {site}: {str(e)}")
+    
+    print(f"\n\n{colors.GREEN}Busca concluída!{colors.END}")
+    return resultados
+
+def resumo_resultados(resultados):
+    """Mostra um resumo categorizado dos resultados"""
+    if not resultados:
+        return
+    
+    categorias = {}
+    for site, dados in resultados.items():
+        categoria = dados.get('categoria', 'Outros')
+        if categoria not in categorias:
+            categorias[categoria] = []
+        categorias[categoria].append((site, dados))
+    
+    print(f"\n{colors.BOLD}═ RESUMO POR CATEGORIA ═{colors.END}")
+    
+    for categoria, sites in categorias.items():
+        encontrados = [s[0] for s in sites if s[1]['exists']]
+        nao_encontrados = [s[0] for s in sites if not s[1]['exists']]
+        
+        print(f"\n{colors.BOLD}▓ {categoria.upper()} ({len(sites)}){colors.END}")
+        if encontrados:
+            print(f"  {colors.GREEN}🟢 Encontrados ({len(encontrados)}):{colors.END}")
+            print("   ", ", ".join(encontrados))
+        if nao_encontrados:
+            print(f"  {colors.YELLOW}⚪ Não encontrados ({len(nao_encontrados)}):{colors.END}")
+            print("   ", ", ".join(nao_encontrados))
+
+def salvar_resultados(username, resultados):
+    """Salva os resultados em um arquivo JSON"""
+    if not resultados:
+        return
+    
+    nome_arquivo = f"eriknet_results_{username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    caminho_arquivo = os.path.join(PASTA_RESULTADOS, nome_arquivo)
+    
+    with open(caminho_arquivo, 'w', encoding='utf-8') as f:
+        json.dump(resultados, f, indent=2, ensure_ascii=False)
+    
+    print(f"\n{colors.BLUE}Resultados salvos em: {caminho_arquivo}{colors.END}")
+
+def menu_principal():
+    limpar_tela()
+    print(BANNER)
+    print(f"\n[{datetime.now().strftime('%d/%m/%Y %H:%M:%S')}]")
+    print(f"\n{colors.BOLD}1. Buscar por nome de usuário")
+    print(f"2. Sair{colors.END}")
+    
+    try:
+        return int(input("\nEscolha uma opção (1-2): "))
+    except:
+        return 0
+
+# Lista de sites atualizada com as novas plataformas
+sites = {
+    "GitHub": {
+        "url": "https://github.com/{username}",
+        "method": "API/Scraping",
+        "categoria": "Desenvolvimento"
+    },
+    "Twitter": {
+        "url": "https://twitter.com/{username}",
+        "method": "API/Scraping",
+        "categoria": "Redes Sociais"
+    },
+    "Instagram": {
+        "url": "https://instagram.com/{username}",
+        "method": "Scraping",
+        "categoria": "Redes Sociais"
+    },
+    "Facebook": {
+        "url": "https://facebook.com/{username}",
+        "method": "Scraping",
+        "categoria": "Redes Sociais"
+    },
+    "YouTube": {
+        "url": "https://youtube.com/{username}",
+        "method": "API/Scraping",
+        "categoria": "Vídeos"
+    },
+    "Reddit": {
+        "url": "https://reddit.com/user/{username}",
+        "method": "API/Scraping",
+        "categoria": "Fóruns"
+    },
+    "LinkedIn": {
+        "url": "https://linkedin.com/in/{username}",
+        "method": "Scraping",
+        "categoria": "Profissional"
+    },
+    "Pinterest": {
+        "url": "https://pinterest.com/{username}",
+        "method": "API/Scraping",
+        "categoria": "Imagens"
+    },
+    "TikTok": {
+        "url": "https://tiktok.com/@{username}",
+        "method": "Scraping",
+        "categoria": "Vídeos"
+    },
+    "Kwai": {
+        "url": "https://kwai.com/user/{username}",
+        "method": "Scraping",
+        "categoria": "Vídeos"
+    },
+    "Chopi": {
+        "url": "https://chopi.com.br/{username}",
+        "method": "Scraping",
+        "categoria": "Streaming"
+    },
+    "Stream": {
+        "url": "https://stream.me/{username}",
+        "method": "Scraping",
+        "categoria": "Streaming"
+    },
+    "Twitch": {
+        "url": "https://twitch.tv/{username}",
+        "method": "Scraping",
+        "categoria": "Streaming"
+    },
+    "Steam": {
+        "url": "https://steamcommunity.com/id/{username}",
+        "method": "Scraping",
+        "categoria": "Jogos"
+    },
+    "Spotify": {
+        "url": "https://open.spotify.com/user/{username}",
+        "method": "Scraping",
+        "categoria": "Música"
+    },
+    "SoundCloud": {
+        "url": "https://soundcloud.com/{username}",
+        "method": "Scraping",
+        "categoria": "Música"
+    },
+    "Vimeo": {
+        "url": "https://vimeo.com/{username}",
+        "method": "Scraping",
+        "categoria": "Vídeos"
+    },
+    "Flickr": {
+        "url": "https://flickr.com/photos/{username}",
+        "method": "Scraping",
+        "categoria": "Fotografia"
+    },
+    "DeviantArt": {
+        "url": "https://{username}.deviantart.com",
+        "method": "Scraping",
+        "categoria": "Arte"
+    },
+    "Behance": {
+        "url": "https://behance.net/{username}",
+        "method": "Scraping",
+        "categoria": "Design"
+    },
+    "Dribbble": {
+        "url": "https://dribbble.com/{username}",
+        "method": "Scraping",
+        "categoria": "Design"
+    },
+    "Medium": {
+        "url": "https://medium.com/@{username}",
+        "method": "Scraping",
+        "categoria": "Blogs"
+    },
+    "Tumblr": {
+        "url": "https://{username}.tumblr.com",
+        "method": "Scraping",
+        "categoria": "Blogs"
+    },
+    "WordPress": {
+        "url": "https://{username}.wordpress.com",
+        "method": "Scraping",
+        "categoria": "Blogs"
+    },
+    "Wikipedia": {
+        "url": "https://en.wikipedia.org/wiki/User:{username}",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Quora": {
+        "url": "https://quora.com/profile/{username}",
+        "method": "Scraping",
+        "categoria": "Q&A"
+    },
+    "StackOverflow": {
+        "url": "https://stackoverflow.com/users/{username}",
+        "method": "Scraping",
+        "categoria": "Programação"
+    },
+    "GitLab": {
+        "url": "https://gitlab.com/{username}",
+        "method": "Scraping",
+        "categoria": "Programação"
+    },
+    "Bitbucket": {
+        "url": "https://bitbucket.org/{username}",
+        "method": "Scraping",
+        "categoria": "Programação"
+    },
+    "Keybase": {
+        "url": "https://keybase.io/{username}",
+        "method": "Scraping",
+        "categoria": "Segurança"
+    },
+    "HackerNews": {
+        "url": "https://news.ycombinator.com/user?id={username}",
+        "method": "Scraping",
+        "categoria": "Notícias"
+    },
+    "Pastebin": {
+        "url": "https://pastebin.com/u/{username}",
+        "method": "Scraping",
+        "categoria": "Ferramentas"
+    },
+    "Slideshare": {
+        "url": "https://slideshare.net/{username}",
+        "method": "Scraping",
+        "categoria": "Apresentações"
+    },
+    "SlideShare": {
+        "url": "https://slideshare.net/{username}",
+        "method": "Scraping",
+        "categoria": "Apresentações"
+    },
+    "CodePen": {
+        "url": "https://codepen.io/{username}",
+        "method": "Scraping",
+        "categoria": "Programação"
+    },
+    "Replit": {
+        "url": "https://replit.com/@{username}",
+        "method": "Scraping",
+        "categoria": "Programação"
+    },
+    "KhanAcademy": {
+        "url": "https://khanacademy.org/profile/{username}",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Duolingo": {
+        "url": "https://duolingo.com/profile/{username}",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "ResearchGate": {
+        "url": "https://researchgate.net/profile/{username}",
+        "method": "Scraping",
+        "categoria": "Acadêmico"
+    },
+    "Academia.edu": {
+        "url": "https://independent.academia.edu/{username}",
+        "method": "Scraping",
+        "categoria": "Acadêmico"
+    },
+    "Goodreads": {
+        "url": "https://goodreads.com/{username}",
+        "method": "Scraping",
+        "categoria": "Livros"
+    },
+    "Last.fm": {
+        "url": "https://last.fm/user/{username}",
+        "method": "Scraping",
+        "categoria": "Música"
+    },
+    "Bandcamp": {
+        "url": "https://bandcamp.com/{username}",
+        "method": "Scraping",
+        "categoria": "Música"
+    },
+    "Foursquare": {
+        "url": "https://foursquare.com/{username}",
+        "method": "Scraping",
+        "categoria": "Localização"
+    },
+    "TripAdvisor": {
+        "url": "https://tripadvisor.com/members/{username}",
+        "method": "Scraping",
+        "categoria": "Viagens"
+    },
+    "Couchsurfing": {
+        "url": "https://couchsurfing.com/people/{username}",
+        "method": "Scraping",
+        "categoria": "Viagens"
+    },
+    "ReverbNation": {
+        "url": "https://reverbnation.com/{username}",
+        "method": "Scraping",
+        "categoria": "Música"
+    },
+    "Letterboxd": {
+        "url": "https://letterboxd.com/{username}",
+        "method": "Scraping",
+        "categoria": "Filmes"
+    },
+    "IMDb": {
+        "url": "https://imdb.com/user/{username}",
+        "method": "Scraping",
+        "categoria": "Filmes"
+    },
+    "Trakt": {
+        "url": "https://trakt.tv/users/{username}",
+        "method": "Scraping",
+        "categoria": "Filmes"
+    },
+    "500px": {
+        "url": "https://500px.com/{username}",
+        "method": "Scraping",
+        "categoria": "Fotografia"
+    },
+    "Pexels": {
+        "url": "https://pexels.com/@{username}",
+        "method": "Scraping",
+        "categoria": "Fotografia"
+    },
+    "Unsplash": {
+        "url": "https://unsplash.com/@{username}",
+        "method": "Scraping",
+        "categoria": "Fotografia"
+    },
+    "VSCO": {
+        "url": "https://vsco.co/{username}",
+        "method": "Scraping",
+        "categoria": "Fotografia"
+    },
+    "Gumroad": {
+        "url": "https://gumroad.com/{username}",
+        "method": "Scraping",
+        "categoria": "Comércio"
+    },
+    "Patreon": {
+        "url": "https://patreon.com/{username}",
+        "method": "Scraping",
+        "categoria": "Finanças"
+    },
+    "PayPal": {
+        "url": "https://paypal.me/{username}",
+        "method": "Scraping",
+        "categoria": "Finanças"
+    },
+    "Venmo": {
+        "url": "https://venmo.com/{username}",
+        "method": "Scraping",
+        "categoria": "Finanças"
+    },
+    "CashApp": {
+        "url": "https://cash.app/${username}",
+        "method": "Scraping",
+        "categoria": "Finanças"
+    },
+    "Codementor": {
+        "url": "https://codementor.io/{username}",
+        "method": "Scraping",
+        "categoria": "Programação"
+    },
+    "Topcoder": {
+        "url": "https://topcoder.com/members/{username}",
+        "method": "Scraping",
+        "categoria": "Programação"
+    },
+    "HackerRank": {
+        "url": "https://hackerrank.com/{username}",
+        "method": "Scraping",
+        "categoria": "Programação"
+    },
+    "CodeChef": {
+        "url": "https://codechef.com/users/{username}",
+        "method": "Scraping",
+        "categoria": "Programação"
+    },
+    "LeetCode": {
+        "url": "https://leetcode.com/{username}",
+        "method": "Scraping",
+        "categoria": "Programação"
+    },
+    "Kaggle": {
+        "url": "https://kaggle.com/{username}",
+        "method": "Scraping",
+        "categoria": "Data Science"
+    },
+    "Dev.to": {
+        "url": "https://dev.to/{username}",
+        "method": "Scraping",
+        "categoria": "Programação"
+    },
+    "ProductHunt": {
+        "url": "https://producthunt.com/@{username}",
+        "method": "Scraping",
+        "categoria": "Tecnologia"
+    },
+    "AngelList": {
+        "url": "https://angel.co/{username}",
+        "method": "Scraping",
+        "categoria": "Negócios"
+    },
+    "Crunchbase": {
+        "url": "https://crunchbase.com/person/{username}",
+        "method": "Scraping",
+        "categoria": "Negócios"
+    },
+    "About.me": {
+        "url": "https://about.me/{username}",
+        "method": "Scraping",
+        "categoria": "Portfólio"
+    },
+    "Linktree": {
+        "url": "https://linktr.ee/{username}",
+        "method": "Scraping",
+        "categoria": "Links"
+    },
+    "Carrd": {
+        "url": "https://{username}.carrd.co",
+        "method": "Scraping",
+        "categoria": "Portfólio"
+    },
+    "Notion": {
+        "url": "https://notion.so/{username}",
+        "method": "Scraping",
+        "categoria": "Produtividade"
+    },
+    "Trello": {
+        "url": "https://trello.com/{username}",
+        "method": "Scraping",
+        "categoria": "Produtividade"
+    },
+    "Etsy": {
+        "url": "https://etsy.com/shop/{username}",
+        "method": "Scraping",
+        "categoria": "Comércio"
+    },
+    "eBay": {
+        "url": "https://ebay.com/usr/{username}",
+        "method": "Scraping",
+        "categoria": "Comércio"
+    },
+    "Amazon": {
+        "url": "https://amazon.com/gp/profile/amzn1.account.{username}",
+        "method": "Scraping",
+        "categoria": "Comércio"
+    },
+    "AliExpress": {
+        "url": "https://aliexpress.com/store/{username}",
+        "method": "Scraping",
+        "categoria": "Comércio"
+    },
+    "Wattpad": {
+        "url": "https://wattpad.com/user/{username}",
+        "method": "Scraping",
+        "categoria": "Literatura"
+    },
+    "Fanfiction": {
+        "url": "https://fanfiction.net/u/{username}",
+        "method": "Scraping",
+        "categoria": "Literatura"
+    },
+    "ArchiveOfOurOwn": {
+        "url": "https://archiveofourown.org/users/{username}",
+        "method": "Scraping",
+        "categoria": "Literatura"
+    },
+    "Instructables": {
+        "url": "https://instructables.com/member/{username}",
+        "method": "Scraping",
+        "categoria": "DIY"
+    },
+    "Hackaday": {
+        "url": "https://hackaday.io/{username}",
+        "method": "Scraping",
+        "categoria": "Tecnologia"
+    },
+    "Arduino": {
+        "url": "https://create.arduino.cc/projecthub/{username}",
+        "method": "Scraping",
+        "categoria": "Eletrônica"
+    },
+    "RaspberryPi": {
+        "url": "https://raspberrypi.org/forums/memberlist.php?username={username}",
+        "method": "Scraping",
+        "categoria": "Eletrônica"
+    },
+    "Adafruit": {
+        "url": "https://adafruit.com/forums/memberlist.php?username={username}",
+        "method": "Scraping",
+        "categoria": "Eletrônica"
+    },
+    "SparkFun": {
+        "url": "https://forum.sparkfun.com/member/{username}",
+        "method": "Scraping",
+        "categoria": "Eletrônica"
+    },
+    "Hackster": {
+        "url": "https://hackster.io/{username}",
+        "method": "Scraping",
+        "categoria": "Eletrônica"
+    },
+    "Tindie": {
+        "url": "https://tindie.com/stores/{username}",
+        "method": "Scraping",
+        "categoria": "Eletrônica"
+    },
+    "CrowdSupply": {
+        "url": "https://crowdsupply.com/{username}",
+        "method": "Scraping",
+        "categoria": "Financiamento"
+    },
+    "Kickstarter": {
+        "url": "https://kickstarter.com/profile/{username}",
+        "method": "Scraping",
+        "categoria": "Financiamento"
+    },
+    "Indiegogo": {
+        "url": "https://indiegogo.com/individuals/{username}",
+        "method": "Scraping",
+        "categoria": "Financiamento"
+    },
+    "GoFundMe": {
+        "url": "https://gofundme.com/f/{username}",
+        "method": "Scraping",
+        "categoria": "Financiamento"
+    },
+    "Patreon": {
+        "url": "https://patreon.com/{username}",
+        "method": "Scraping",
+        "categoria": "Financiamento"
+    },
+    "OpenCollective": {
+        "url": "https://opencollective.com/{username}",
+        "method": "Scraping",
+        "categoria": "Financiamento"
+    },
+    "Liberapay": {
+        "url": "https://liberapay.com/{username}",
+        "method": "Scraping",
+        "categoria": "Financiamento"
+    },
+    "BuyMeACoffee": {
+        "url": "https://buymeacoffee.com/{username}",
+        "method": "Scraping",
+        "categoria": "Financiamento"
+    },
+    "Ko-fi": {
+        "url": "https://ko-fi.com/{username}",
+        "method": "Scraping",
+        "categoria": "Financiamento"
+    },
+    "Pixiv": {
+        "url": "https://pixiv.net/en/users/{username}",
+        "method": "Scraping",
+        "categoria": "Arte"
+    },
+    "ArtStation": {
+        "url": "https://artstation.com/{username}",
+        "method": "Scraping",
+        "categoria": "Arte"
+    },
+    "DeviantArt": {
+        "url": "https://deviantart.com/{username}",
+        "method": "Scraping",
+        "categoria": "Arte"
+    },
+    "Behance": {
+        "url": "https://behance.net/{username}",
+        "method": "Scraping",
+        "categoria": "Design"
+    },
+    "Dribbble": {
+        "url": "https://dribbble.com/{username}",
+        "method": "Scraping",
+        "categoria": "Design"
+    },
+    "AminoApps": {
+        "url": "https://aminoapps.com/u/{username}",
+        "method": "Scraping",
+        "categoria": "Comunidades"
+    },
+    "Redbubble": {
+        "url": "https://redbubble.com/people/{username}",
+        "method": "Scraping",
+        "categoria": "Arte"
+    },
+    "Teepublic": {
+        "url": "https://teepublic.com/user/{username}",
+        "method": "Scraping",
+        "categoria": "Arte"
+    },
+    "Society6": {
+        "url": "https://society6.com/{username}",
+        "method": "Scraping",
+        "categoria": "Arte"
+    },
+    "Zazzle": {
+        "url": "https://zazzle.com/mbr/238{username}",
+        "method": "Scraping",
+        "categoria": "Arte"
+    },
+    "Spreadshirt": {
+        "url": "https://spreadshirt.com/user/{username}",
+        "method": "Scraping",
+        "categoria": "Arte"
+    },
+    "Threadless": {
+        "url": "https://threadless.com/@{username}",
+        "method": "Scraping",
+        "categoria": "Arte"
+    },
+    "DesignByHumans": {
+        "url": "https://designbyhumans.com/shop/{username}",
+        "method": "Scraping",
+        "categoria": "Arte"
+    },
+    "CreativeMarket": {
+        "url": "https://creativemarket.com/{username}",
+        "method": "Scraping",
+        "categoria": "Design"
+    },
+    "Envato": {
+        "url": "https://envato.com/user/{username}",
+        "method": "Scraping",
+        "categoria": "Design"
+    },
+    "Blend": {
+        "url": "https://blend.market/{username}",
+        "method": "Scraping",
+        "categoria": "Design"
+    },
+    "UI8": {
+        "url": "https://ui8.net/{username}",
+        "method": "Scraping",
+        "categoria": "Design"
+    },
+    "Uplabs": {
+        "url": "https://uplabs.com/{username}",
+        "method": "Scraping",
+        "categoria": "Design"
+    },
+    "Dafont": {
+        "url": "https://dafont.com/{username}",
+        "method": "Scraping",
+        "categoria": "Fontes"
+    },
+    "FontSpace": {
+        "url": "https://fontspace.com/profile/{username}",
+        "method": "Scraping",
+        "categoria": "Fontes"
+    },
+    "FontSquirrel": {
+        "url": "https://fontsquirrel.com/users/{username}",
+        "method": "Scraping",
+        "categoria": "Fontes"
+    },
+    "GoogleFonts": {
+        "url": "https://fonts.google.com/?query={username}",
+        "method": "Scraping",
+        "categoria": "Fontes"
+    },
+    "MyFonts": {
+        "url": "https://myfonts.com/people/{username}",
+        "method": "Scraping",
+        "categoria": "Fontes"
+    },
+    "FontStruct": {
+        "url": "https://fontstruct.com/fontstructors/{username}",
+        "method": "Scraping",
+        "categoria": "Fontes"
+    },
+    "Calligraphr": {
+        "url": "https://calligraphr.com/en/users/{username}",
+        "method": "Scraping",
+        "categoria": "Fontes"
+    },
+    "FontShop": {
+        "url": "https://fontshop.com/people/{username}",
+        "method": "Scraping",
+        "categoria": "Fontes"
+    },
+    "FontBundles": {
+        "url": "https://fontbundles.net/{username}",
+        "method": "Scraping",
+        "categoria": "Fontes"
+    },
+    "TheHungryJPEG": {
+        "url": "https://thehungryjpeg.com/users/{username}",
+        "method": "Scraping",
+        "categoria": "Design"
+    },
+    "DesignBundles": {
+        "url": "https://designbundles.net/{username}",
+        "method": "Scraping",
+        "categoria": "Design"
+    },
+    "CreativeFabrica": {
+        "url": "https://creativefabrica.com/designers/{username}",
+        "method": "Scraping",
+        "categoria": "Design"
+    },
+    "Etsy": {
+        "url": "https://etsy.com/shop/{username}",
+        "method": "Scraping",
+        "categoria": "Comércio"
+    },
+    "BigCartel": {
+        "url": "https://{username}.bigcartel.com",
+        "method": "Scraping",
+        "categoria": "Comércio"
+    },
+    "Shopify": {
+        "url": "https://{username}.myshopify.com",
+        "method": "Scraping",
+        "categoria": "Comércio"
+    },
+    "Gumroad": {
+        "url": "https://gumroad.com/{username}",
+        "method": "Scraping",
+        "categoria": "Comércio"
+    },
+    "Payhip": {
+        "url": "https://payhip.com/{username}",
+        "method": "Scraping",
+        "categoria": "Comércio"
+    },
+    "Selz": {
+        "url": "https://{username}.selz.com",
+        "method": "Scraping",
+        "categoria": "Comércio"
+    },
+    "Pods": {
+        "url": "https://{username}.pods.com",
+        "method": "Scraping",
+        "categoria": "Comércio"
+    },
+    "Storenvy": {
+        "url": "https://{username}.storenvy.com",
+        "method": "Scraping",
+        "categoria": "Comércio"
+    },
+    "Square": {
+        "url": "https://squareup.com/store/{username}",
+        "method": "Scraping",
+        "categoria": "Comércio"
+    },
+    "Wix": {
+        "url": "https://{username}.wixsite.com/website",
+        "method": "Scraping",
+        "categoria": "Websites"
+    },
+    "Weebly": {
+        "url": "https://{username}.weebly.com",
+        "method": "Scraping",
+        "categoria": "Websites"
+    },
+    "Webflow": {
+        "url": "https://{username}.webflow.io",
+        "method": "Scraping",
+        "categoria": "Websites"
+    },
+    "Squarespace": {
+        "url": "https://{username}.squarespace.com",
+        "method": "Scraping",
+        "categoria": "Websites"
+    },
+    "Jimdo": {
+        "url": "https://{username}.jimdosite.com",
+        "method": "Scraping",
+        "categoria": "Websites"
+    },
+    "Tilda": {
+        "url": "https://{username}.tilda.ws",
+        "method": "Scraping",
+        "categoria": "Websites"
+    },
+    "Site123": {
+        "url": "https://{username}.site123.me",
+        "method": "Scraping",
+        "categoria": "Websites"
+    },
+    "Ucraft": {
+        "url": "https://{username}.ucraft.site",
+        "method": "Scraping",
+        "categoria": "Websites"
+    },
+    "Strikingly": {
+        "url": "https://{username}.strikingly.com",
+        "method": "Scraping",
+        "categoria": "Websites"
+    },
+    "Webnode": {
+        "url": "https://{username}.webnode.com",
+        "method": "Scraping",
+        "categoria": "Websites"
+    },
+    "Yola": {
+        "url": "https://{username}.yola.com",
+        "method": "Scraping",
+        "categoria": "Websites"
+    },
+    "IMCreator": {
+        "url": "https://{username}.imcreator.com",
+        "method": "Scraping",
+        "categoria": "Websites"
+    },
+    "Moonfruit": {
+        "url": "https://{username}.moonfruit.com",
+        "method": "Scraping",
+        "categoria": "Websites"
+    },
+    "Sitey": {
+        "url": "https://{username}.sitey.com",
+        "method": "Scraping",
+        "categoria": "Websites"
+    },
+    "Duda": {
+        "url": "https://{username}.dudaone.com",
+        "method": "Scraping",
+        "categoria": "Websites"
+    },
+    "GoDaddy": {
+        "url": "https://{username}.godaddysites.com",
+        "method": "Scraping",
+        "categoria": "Websites"
+    },
+    "GoogleSites": {
+        "url": "https://sites.google.com/view/{username}",
+        "method": "Scraping",
+        "categoria": "Websites"
+    },
+    "Blogger": {
+        "url": "https://{username}.blogspot.com",
+        "method": "Scraping",
+        "categoria": "Blogs"
+    },
+    "WordPress": {
+        "url": "https://{username}.wordpress.com",
+        "method": "Scraping",
+        "categoria": "Blogs"
+    },
+    "Tumblr": {
+        "url": "https://{username}.tumblr.com",
+        "method": "Scraping",
+        "categoria": "Blogs"
+    },
+    "Medium": {
+        "url": "https://medium.com/@{username}",
+        "method": "Scraping",
+        "categoria": "Blogs"
+    },
+    "Ghost": {
+        "url": "https://{username}.ghost.io",
+        "method": "Scraping",
+        "categoria": "Blogs"
+    },
+    "Substack": {
+        "url": "https://{username}.substack.com",
+        "method": "Scraping",
+        "categoria": "Blogs"
+    },
+    "Svbtle": {
+        "url": "https://{username}.svbtle.com",
+        "method": "Scraping",
+        "categoria": "Blogs"
+    },
+    "Posthaven": {
+        "url": "https://{username}.posthaven.com",
+        "method": "Scraping",
+        "categoria": "Blogs"
+    },
+    "Write.as": {
+        "url": "https://write.as/{username}",
+        "method": "Scraping",
+        "categoria": "Blogs"
+    },
+    "Telegraph": {
+        "url": "https://telegra.ph/{username}",
+        "method": "Scraping",
+        "categoria": "Blogs"
+    },
+    "Joomla": {
+        "url": "https://{username}.joomla.com",
+        "method": "Scraping",
+        "categoria": "Websites"
+    },
+    "Drupal": {
+        "url": "https://{username}.drupal.com",
+        "method": "Scraping",
+        "categoria": "Websites"
+    },
+    "Moodle": {
+        "url": "https://{username}.moodle.com",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Blackboard": {
+        "url": "https://{username}.blackboard.com",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Canvas": {
+        "url": "https://{username}.instructure.com",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Schoology": {
+        "url": "https://{username}.schoology.com",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Edmodo": {
+        "url": "https://{username}.edmodo.com",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "GoogleClassroom": {
+        "url": "https://classroom.google.com/u/{username}",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "KhanAcademy": {
+        "url": "https://khanacademy.org/profile/{username}",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Duolingo": {
+        "url": "https://duolingo.com/profile/{username}",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Codecademy": {
+        "url": "https://codecademy.com/profiles/{username}",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Udemy": {
+        "url": "https://udemy.com/user/{username}",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Coursera": {
+        "url": "https://coursera.org/user/{username}",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "edX": {
+        "url": "https://edx.org/user/{username}",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Skillshare": {
+        "url": "https://skillshare.com/profile/{username}",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Pluralsight": {
+        "url": "https://pluralsight.com/profile/{username}",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Treehouse": {
+        "url": "https://teamtreehouse.com/{username}",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Lynda": {
+        "url": "https://lynda.com/member/{username}",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Udacity": {
+        "url": "https://udacity.com/me/{username}",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "FutureLearn": {
+        "url": "https://futurelearn.com/profiles/{username}",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Alison": {
+        "url": "https://alison.com/user/{username}",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "OpenSesame": {
+        "url": "https://opensesame.com/u/{username}",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "LearnWorlds": {
+        "url": "https://{username}.learnworlds.com",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Teachable": {
+        "url": "https://{username}.teachable.com",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Thinkific": {
+        "url": "https://{username}.thinkific.com",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Podia": {
+        "url": "https://{username}.podia.com",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Kajabi": {
+        "url": "https://{username}.kajabi.com",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "LearnDash": {
+        "url": "https://{username}.learndash.com",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "LifterLMS": {
+        "url": "https://{username}.lifterlms.com",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "LearnPress": {
+        "url": "https://{username}.learnpress.com",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "WizIQ": {
+        "url": "https://{username}.wiziq.com",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Ruzuku": {
+        "url": "https://{username}.ruzuku.com",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "CourseCraft": {
+        "url": "https://{username}.coursecraft.com",
+        "method": "Scraping",
+        "categoria": "Educação"
+    },
+    "Fedora": {
+        "url": "https://fedoraproject.org/wiki/User:{username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "ArchLinux": {
+        "url": "https://wiki.archlinux.org/index.php/User:{username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "Gentoo": {
+        "url": "https://wiki.gentoo.org/wiki/User:{username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "Debian": {
+        "url": "https://wiki.debian.org/User:{username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "Ubuntu": {
+        "url": "https://wiki.ubuntu.com/{username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "OpenSUSE": {
+        "url": "https://en.opensuse.org/User:{username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "Slackware": {
+        "url": "https://docs.slackware.com/wiki/User:{username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "Mageia": {
+        "url": "https://wiki.mageia.org/en/User:{username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "CentOS": {
+        "url": "https://wiki.centos.org/Users/{username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "RedHat": {
+        "url": "https://access.redhat.com/users/{username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "LinuxMint": {
+        "url": "https://community.linuxmint.com/user/{username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "Manjaro": {
+        "url": "https://forum.manjaro.org/u/{username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "Elementary": {
+        "url": "https://elementaryos.stackexchange.com/users/{username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "Zorin": {
+        "url": "https://forum.zorin.com/u/{username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "PopOS": {
+        "url": "https://pop-planet.info/forums/members/{username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "Kali": {
+        "url": "https://forums.kali.org/member.php?username={username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "Parrot": {
+        "url": "https://community.parrotsec.org/u/{username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "Tails": {
+        "url": "https://tails.boum.org/contribute/how/forum/{username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "Qubes": {
+        "url": "https://forum.qubes-os.org/u/{username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "Alpine": {
+        "url": "https://wiki.alpinelinux.org/wiki/User:{username}",
+        "method": "Scraping",
+        "categoria": "Linux"
+    },
+    "Slack": {
+        "url": "https://{username}.slack.com",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Discord": {
+        "url": "https://discord.com/users/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Telegram": {
+        "url": "https://t.me/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Skype": {
+        "url": "https://web.skype.com/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "WhatsApp": {
+        "url": "https://wa.me/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Signal": {
+        "url": "https://signal.me/#p/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Wire": {
+        "url": "https://app.wire.com/u/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Keybase": {
+        "url": "https://keybase.io/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Matrix": {
+        "url": "https://matrix.to/#/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Riot": {
+        "url": "https://riot.im/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Jitsi": {
+        "url": "https://meet.jit.si/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Zoom": {
+        "url": "https://zoom.us/profile/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "GoogleMeet": {
+        "url": "https://meet.google.com/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "MicrosoftTeams": {
+        "url": "https://teams.microsoft.com/l/chat/0/0?users={username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Webex": {
+        "url": "https://webex.com/meet/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "GoToMeeting": {
+        "url": "https://global.gotomeeting.com/join/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "BlueJeans": {
+        "url": "https://bluejeans.com/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Join.me": {
+        "url": "https://join.me/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "BigBlueButton": {
+        "url": "https://bigbluebutton.org/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Jami": {
+        "url": "https://jami.net/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Tox": {
+        "url": "https://tox.chat/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Briar": {
+        "url": "https://briarproject.org/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Session": {
+        "url": "https://getsession.org/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Status": {
+        "url": "https://status.im/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "DeltaChat": {
+        "url": "https://delta.chat/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Element": {
+        "url": "https://element.io/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Mattermost": {
+        "url": "https://mattermost.com/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "RocketChat": {
+        "url": "https://rocket.chat/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Zulip": {
+        "url": "https://zulip.com/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "IRC": {
+        "url": "https://webchat.freenode.net/#{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "XMPP": {
+        "url": "https://xmpp.org/contact/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "SIP": {
+        "url": "https://sipjs.com/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Linphone": {
+        "url": "https://linphone.org/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Jitsi": {
+        "url": "https://jitsi.org/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Mumble": {
+        "url": "https://mumble.info/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "TeamSpeak": {
+        "url": "https://teamspeak.com/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Ventrilo": {
+        "url": "https://ventrilo.com/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Discord": {
+        "url": "https://discord.com/users/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Guilded": {
+        "url": "https://guilded.gg/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Chop": {
+        "url": "https://chopapp.com/user/{username}",
+        "method": "Scraping",
+        "categoria": "Comunicação"
+    },
+    "Stream": {
+        "url": "https://stream.me/user/{username}",
+        "method": "Scraping",
+        "categoria": "Streaming"
+    }
+}
+
+def main():
+    try:
+        while True:
+            opcao = menu_principal()
+            
+            if opcao == 1:
+                username = input("\nDigite o nome de usuário: ").strip()
+                resultados = buscar_perfis(username)
+                
+                if resultados:
+                    resumo_resultados(resultados)
+                    salvar_resultados(username, resultados)
+                
+            elif opcao == 2:
+                print(f"\n{colors.GREEN}Saindo do ErikNet...{colors.END}")
+                break
+                
+            else:
+                print(f"\n{colors.RED}Opção inválida! Tente novamente.{colors.END}")
+                time.sleep(1)
+            
+            input(f"\n{colors.BLUE}Pressione Enter para continuar...{colors.END}")
+    
+    except KeyboardInterrupt:
+        print(f"\n\n{colors.RED}ErikNet interrompido pelo usuário!{colors.END}")
+    except Exception as e:
+        print(f"\n{colors.RED}ERRO CRÍTICO: {str(e)}{colors.END}")
+    finally:
+        print(f"\n{colors.BOLD}Obrigado por usar o ErikNet!{colors.END}\n")
+
+if __name__ == "__main__":
+    main() esse script tem algum erro de sintaxa? me fala a vdd n inventa pfv
